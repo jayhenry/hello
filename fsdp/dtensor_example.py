@@ -12,7 +12,7 @@ torch.cuda.set_device(rank)
 print(f"Running example on {rank=} in a world with {world_size=}")
 
 # construct a device mesh with available devices (multi-host or single host)
-device_mesh = init_device_mesh("cuda", (4,))
+device_mesh = init_device_mesh("cuda", (world_size,))
 # if we want to do row-wise sharding
 rowwise_placement=[Shard(0)]
 # if we want to do col-wise sharding
@@ -20,6 +20,7 @@ colwise_placement=[Shard(1)]
 
 # big_tensor = torch.randn(888, 12)
 big_tensor = torch.randn(4, 4)
+print(f"[Rank {rank}] big_tensor: {big_tensor}")
 # distributed tensor returned will be sharded across the dimension specified in placements
 rowwise_tensor = distribute_tensor(big_tensor, device_mesh=device_mesh, placements=rowwise_placement)
 print(f"[Rank {rank}] rowwise_tensor shape: {rowwise_tensor.shape}, type: {type(rowwise_tensor)}, to_local shape: {rowwise_tensor.to_local().shape}, type: {type(rowwise_tensor.to_local())}")
