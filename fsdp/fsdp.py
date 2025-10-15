@@ -1,7 +1,8 @@
+import os
+import sys
+
 import torch
 import torch.nn as nn
-import os
-
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard, FSDPModule, MixedPrecisionPolicy
 import torch.distributed as dist
@@ -43,7 +44,10 @@ print(f"Rank {rank}, Device: {device}")
 with torch.device("meta"):
     model = ToyModel()
 
+mesh = init_device_mesh("cuda", (world_size, 1), mesh_dim_names=("fsdp", "ep"))
+fsdp_mesh = mesh["fsdp"]
 fsdp_kwargs = {
+    "mesh": fsdp_mesh,
     "mp_policy": MixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
         reduce_dtype=torch.float32,
@@ -103,10 +107,10 @@ def load_model_dcp(model: nn.Module, checkpoint_fname: str):
 load = False
 if load and os.path.exists(checkpoint_fname):
     # load_model(model, checkpoint_fname)
-    print(f"Loading model from {checkpoint_fname} using dcp")
+    print(f"Loading meta device model from {checkpoint_fname} using dcp")
     load_model_dcp(model, checkpoint_fname)
 else:
-    print(f"Loading model from meta to actual device")
+    print(f"Skip Loading model, put meta to actual device by to_empty()")
     model.to_empty(device=device)
     # maybe initialize model weight here if needed
 
@@ -143,6 +147,7 @@ for name, param in cur.named_parameters(recurse=False):
     if rank == 0:
         print(f"after reshard cur_model param: {name} has dtype {param.dtype}, has type {type(param)}")
 
+sys.exit()
 
 ############################## optimizer ######################
 # Note the optimizer is constructed after applying fully_shard. Both model and optimizer state dicts are represented in DTensor.
