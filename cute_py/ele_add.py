@@ -238,6 +238,7 @@ def elementwise_add(
     #  - each thread load 8 contiguous element each row and load 4 rows
 
     # 4426 GB/s
+    # 4540.08 GB/s, 4566.70 GB/s, 4898.97 GB/s, 4262.27 GB/s, 4427.11 GB/s
     thr_layout = cute.make_layout((4, 32), stride=(32, 1))
     val_layout = cute.make_layout((4, 8), stride=(8, 1))
     tiler_mn, tv_layout = cute.make_layout_tv(thr_layout, val_layout)
@@ -265,6 +266,75 @@ def elementwise_add(
     )
 
 
+@cute.kernel
+def elementwise_add_mytv_kernel(
+    gA: cute.Tensor,
+    gB: cute.Tensor,
+    gC: cute.Tensor,
+    tv_layout: cute.Layout
+):
+    tidx, _, _ = cute.arch.thread_idx()
+    bidx, _, _ = cute.arch.block_idx()
+
+    # ((TileM, TileN), (RestM, RestN))
+    #     (16,256),       (128,8)
+    print(f"gA.shape: {gA.shape}")
+    restM, restN = gA.shape[1]  # for rest m n
+    m = bidx // restN
+    n = bidx % restN
+    if m >= restM:
+        pass
+    else:
+        # slice for block-level
+        # ((TileM, TileN), (RestM, RestN)) -> (TileM, TileN) -> ((ThreadN, ThreadM), (ValueN, ValueM))
+        # cute.printf("gA = {}", gA)
+        print(f"gA.type = {gA.type}")  # ((16,256),(128,8)):((2048,1),(32768,256))
+        sA = cute.composition(gA[(None, (m,n))], tv_layout)
+        # cute.printf("sA = {}", sA)
+        print(f"sA.type: {sA.type}")  # ((32,8),(8,2)):((8,4096),(1,2048))
+        sB = cute.composition(gB[(None, (m,n))], tv_layout)
+        sC = cute.composition(gC[(None, (m,n))], tv_layout)
+        # slice for thread-level 
+        # ((ThreadN, ThreadM), (ValueN, ValueM)) -> (ValueN, ValueM)
+        # cute.printf("sA[(tidx, None)] = {}", sA[(tidx, None)])
+        rA = sA[(tidx, None)]
+        print(f"rA.type: {rA.type}")  # ((8,2)):((1,2048))
+        rB = sB[(tidx, None)]
+        rC = sC[(tidx, None)]
+        rC.store(rA.load() + rB.load())
+
+
+@cute.jit
+def elementwise_add_mytv(
+    mA: cute.Tensor,
+    mB: cute.Tensor,
+    mC: cute.Tensor,
+):
+    # cute.printf("--------- Start elementwise_add_mytv ---------")
+
+    # 4508.58 GB/s, 3916.30 GB/s, 3892.65 GB/s, 4712.56 GB/s
+    # 4717.93 GB/s, 4548.74 GB/s, 4699.61 GB/s, 4457.98 GB/s, 4800.00 GB/s
+    M, N = mA.shape
+    value_layout = cute.make_layout((2,8), stride=(8,1))
+    thread_layout = cute.make_layout((8,32), stride=(32,1))
+    tiler, tv_layout = cute.make_layout_tv(thread_layout, value_layout)
+    # (2x8)x(8x32) = 16x256  
+    print(f">>> Tiler type({type(tiler)}): {tiler}")  # tuple (16, 256)
+    # compose tileA and tv_layout to get: ((Thread_n, Thread_m), (Value_n, Value_m)) 
+    # Attention!!! nD is transposed to the first mode, and mD is transposed to the second mode.
+    # This is for the ease of 1D coordinate to natural coordinate mapping.
+    print(f">>> TV Layout: {tv_layout}")  # ((32,8),(8,2)):((128,2),(16,1))
+    # gA: ((TileM, TileN), (RestM, RestN))
+    gA = cute.zipped_divide(mA, tiler)  # by mode divide
+    gB = cute.zipped_divide(mB, tiler)  # by mode divide
+    gC = cute.zipped_divide(mC, tiler)  # by mode divide
+    elementwise_add_mytv_kernel(gA, gB, gC, tv_layout).launch(
+        grid=[cute.size(gA, mode=[1]), 1, 1],
+        # block=[cute.size(thread_layout), 1, 1],  # both are correct
+        block=[cute.size(tv_layout, mode=[0]), 1, 1],
+    )
+
+
 def tvlayout():
     a = torch.randn(M, N, device="cuda", dtype=torch.float16)
     b = torch.randn(M, N, device="cuda", dtype=torch.float16)
@@ -274,7 +344,8 @@ def tvlayout():
     b_ = from_dlpack(b, assumed_align=16)
     c_ = from_dlpack(c, assumed_align=16)
     
-    elementwise_add_ = cute.compile(elementwise_add, a_, b_, c_)
+    # elementwise_add_ = cute.compile(elementwise_add, a_, b_, c_)
+    elementwise_add_ = cute.compile(elementwise_add_mytv, a_, b_, c_)
     elementwise_add_(a_, b_, c_)
     
     # verify correctness
