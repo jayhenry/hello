@@ -10,7 +10,7 @@ def bar():
     cute.printf("a(dynamic) = {}", a)   # prints `a(dynamic) = 3.140000`
 
     b = cutlass.Int32(5)
-    print("b(static) =", b)             # prints `b(static) = 5`
+    print("b(static) =", b)             # prints `b(static) = ?`
     cute.printf("b(dynamic) = {}", b)   # prints `b(dynamic) = 5`
 
 
@@ -83,6 +83,6 @@ def operator_demo():
 
 
 if __name__ == "__main__":
-    # bar()
+    bar()
     # type_conversion()
-    operator_demo()
+    # operator_demo()

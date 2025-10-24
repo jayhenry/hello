@@ -101,10 +101,13 @@ def binary_op_1(res: cute.Tensor, a: cute.Tensor, b: cute.Tensor):
     cute.print_tensor(div_res)          # prints [0.500000, 0.500000, 0.500000]
 
     floor_div_res = a_vec // b_vec
-    cute.print_tensor(res)              # prints [0.000000, 0.000000, 0.000000]
+    cute.print_tensor(floor_div_res)              # prints [0.000000, 0.000000, 0.000000]
 
     mod_res = a_vec % b_vec
     cute.print_tensor(mod_res)          # prints [1.000000, 1.000000, 1.000000]
+    # Both below are ok. But res=mod_res is wrong.
+    res.store(mod_res)
+    # res[None] = mod_res
 
 
 def ssa_binary():
@@ -114,6 +117,7 @@ def ssa_binary():
     b.fill(2.0)
     res = np.empty((3,), dtype=np.float32)
     binary_op_1(from_dlpack(res), from_dlpack(a), from_dlpack(b))
+    print("res: ", res)
 
 
 @cute.jit
@@ -209,7 +213,7 @@ if __name__ == "__main__":
     # example1()
     # slice_1()
     # slice_2()
-    # ssa_binary()
+    ssa_binary()
     # ssa_unary()
     # ssa_reduction()
-    broadcast_examples()
+    # broadcast_examples()

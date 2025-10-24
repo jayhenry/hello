@@ -24,7 +24,7 @@ def logical_divide_1d_example():
 
 
 @cute.jit
-def logical_divide_2d_example():
+def logical_divide_2d_example_by_mode():
     """
     Demonstrates 2D logical divide :
     Layout Shape : (M, N, L, ...)
@@ -52,7 +52,7 @@ def logical_divide_2d_example():
 
 
 @cute.jit
-def zipped_divide_example():
+def zipped_divide_example_by_mode():
     """
     Demonstrates zipped divide :
     Layout Shape : (M, N, L, ...)
@@ -77,7 +77,7 @@ def zipped_divide_example():
 
 
 @cute.jit
-def tiled_divide_example():
+def tiled_divide_example_by_mode():
     """
     Demonstrates tiled divide :
     Layout Shape : (M, N, L, ...)
@@ -102,7 +102,7 @@ def tiled_divide_example():
 
 
 @cute.jit
-def flat_divide_example():
+def flat_divide_example_by_mode():
     """
     Demonstrates flat divide :
     Layout Shape : (M, N, L, ...)
@@ -128,8 +128,8 @@ def flat_divide_example():
 
 if __name__ == "__main__":
     # logical_divide_1d_example()
-    # logical_divide_2d_example()
-    # zipped_divide_example()
-    # tiled_divide_example()
-    flat_divide_example()
+    # logical_divide_2d_example_by_mode()
+    zipped_divide_example_by_mode()
+    # tiled_divide_example_by_mode()
+    # flat_divide_example_by_mode()
 

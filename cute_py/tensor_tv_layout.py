@@ -8,7 +8,7 @@ import torch
 @cute.jit
 def tensor_tv_layout(a: cute.Tensor):
     # Tensor: (M4,N8)
-    cute.printf("a = {}", a)
+    cute.printf("a = ")
     cute.print_tensor(a)
     # Construct a TV-layout that maps 8 thread indices and 4 value indices
     # to 1D coordinates within a 4x8 tensor
@@ -16,7 +16,7 @@ def tensor_tv_layout(a: cute.Tensor):
     tv_layout = cute.make_layout(((2,4), (2,2)), stride=((8,1), (4,16)))
     print(f"tv_layout = {tv_layout}")
     tv_a = cute.composition(a, tv_layout)
-    cute.printf("tv_a = {}", tv_a)
+    cute.printf("tv_a = ")
     cute.print_tensor(tv_a)
 
     for thread_idx in range(8):
@@ -31,17 +31,30 @@ def tv_layout_example1():
 @cute.jit
 def test_make_layout_tv():
     # TODO:
-    thr_layout = cute.make_layout((4, 32), stride=(32, 1))
-    val_layout = cute.make_layout((4, 8), stride=(8, 1))
-    tiler_mn, tv_layout = cute.make_layout_tv(thr_layout, val_layout)
-    print(f"Tiler: {tiler_mn}")  # (16, 256)
+    #         8                     8  共32组，共256个元素
+    #        --------------------------
+    #     4  | t0 | t1 |    |    |    |
+    #        --------------------------
+    #        |    |    |    |    |    |
+    #        --------------------------
+    #        |    |    |    |    |    |
+    #        --------------------------
+    #     4  |    |    |    |    |    |
+    #        --------------------------
+    #   共4组，共16个元素
+    thr_layout = cute.make_layout((4, 32), stride=(32, 1))  # 上面外层tile的 4组 x 32组
+    val_layout = cute.make_layout((4, 8), stride=(8, 1))  # 上面内层元素的 4 x 8
     print(f"thr_layout: {thr_layout}")
     print(f"val_layout: {val_layout}")
+    # TODO: make_layout_tv anatomy
+    tiler_mn, tv_layout = cute.make_layout_tv(thr_layout, val_layout)
+    print(f"Tiler: {tiler_mn}")  # (16, 256) = (4*4, 32*8)
     print(f"TV Layout: {tv_layout}")  # ((32,4),(8,4)):((128,4),(16,1))
 
 
 @cute.jit
 def test_right_inverse():
+    # TODO:
     # layout = cute.make_layout((4,8), stride=(8,1))
     layout = cute.make_layout((4,8))
     print(f"layout = {layout}")

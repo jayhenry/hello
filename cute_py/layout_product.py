@@ -111,6 +111,6 @@ def zipped_tiled_flat_product_example():
 
 
 if __name__ == "__main__":
-    # logical_product_1d_example()
-    blocked_raked_product_example()
-    zipped_tiled_flat_product_example()
+    logical_product_1d_example()
+    # blocked_raked_product_example()
+    # zipped_tiled_flat_product_example()
