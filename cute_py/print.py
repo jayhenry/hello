@@ -104,7 +104,7 @@ def tensor_print_example3():
 # Example 3: Print tensor on GPU
 @cute.kernel
 def print_tensor_gpu(src: cute.Tensor):
-    print(src)
+    print("compile time:", src)
     cute.print_tensor(src)
 
 @cute.jit
@@ -114,7 +114,7 @@ def print_tensor_host(src: cute.Tensor):
 
 def tensor_print_example4():
     a = torch.randn(4, 3, device="cuda")
-    cutlass.cuda.initialize_cuda_context()
+    # cutlass.cuda.initialize_cuda_context()
     print_tensor_host(from_dlpack(a))
 
 
