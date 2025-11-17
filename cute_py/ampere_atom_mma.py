@@ -11,18 +11,21 @@ import cutlass.torch as cutlass_torch
 import cutlass.utils as utils
 from cutlass.cute.runtime import from_dlpack
 
-cta_tiler = (128, 128, 32)
-bM, bN, bK = cta_tiler
-
-atom_layout_mnk = (2, 2, 1)
-atom_lay_M, atom_lay_N, atom_lay_K = atom_layout_mnk
-num_threads = atom_lay_M * atom_lay_N * atom_lay_K * 32  # 2 * 2 * 1 * 32 = 128
-
 mma_inst_shape = (16, 8, 16)
 mmaM, mmaN, mmaK = mma_inst_shape
+
+mT, nT, kT = 2, 3, 5
+cta_tiler = (16*mT, 8*nT, 16*kT)  # mma_inst_shape  # (128, 128, 32)
+bM, bN, bK = cta_tiler
+
+atom_layout_mnk = (1,1,1)  # (2, 2, 1)
+atom_lay_M, atom_lay_N, atom_lay_K = atom_layout_mnk
+num_threads = atom_lay_M * atom_lay_N * atom_lay_K * 32  # 1 * 1 * 1 * 32 = 32
+
 # mnkl = (1024, 1024, 1024, 1)
 # mnkl = (16, 8, 16, 1)
-mnkl = (128, 128, 32, 1)
+mnkl = (16*mT, 8*nT, 16*kT, 1)
+# mnkl = (128, 128, 32, 1)
 # mnkl = (128*2, 128*2, 32*2, 1)
 M, N, K, L = mnkl
 
@@ -86,6 +89,7 @@ def call_kernel(
     )
     print(f"mma_atom: {mma_atom}")
 
+    # TODO: visualize tiled_mma like `print_latex(tiled_mma)` in https://github.com/NVIDIA/cutlass/discussions/1345
     # ///////////////////////////////////////////////////////////////////////////////
     # 关于 permutation_mnk 的解释:
     # From cute作者 Cecka：
@@ -114,15 +118,11 @@ def call_kernel(
     # 即TiledMMA能处理的MNK为32x32x16。
     # ///////////////////////////////////////////////////////////////////////////////
     permutation_mnk = (
-        atom_layout_mnk[0] * mma_inst_shape[0],        # 2*16 = 32
-        # if atom layout's N-mode is 1, to leverage the largest coalesced
-        # shared memory -> register copy, set the tiled mma's N mode to 16
-        # TODO: 下面是不是 *2， 没有区别？
-        atom_layout_mnk[1] * mma_inst_shape[1] * 2,    # 2*8*2 = 32
-        # atom_layout_mnk[1] * mma_inst_shape[1] ,       # 2*8 = 16
-        atom_layout_mnk[2] * mma_inst_shape[2],        # 1*16 = 16
+        atom_layout_mnk[0] * mma_inst_shape[0],        
+        atom_layout_mnk[1] * mma_inst_shape[1] ,       
+        atom_layout_mnk[2] * mma_inst_shape[2],        
     )
-    print(f"permutation_mnk: {permutation_mnk}")  # (32, 32, 16)
+    print(f"permutation_mnk: {permutation_mnk}")  
 
     # Created a tiled mma that tiles the atom according to specified layout.
     # For a 2x2x1 atom layout, the mma atom is duplicated 4 times, twice
@@ -133,12 +133,11 @@ def call_kernel(
         tC,
         permutation_mnk=permutation_mnk,
     )
-    # TODO: visualize tiled_mma like https://github.com/NVIDIA/cutlass/discussions/1345
     # cute.print_latex(tiled_mma)
     print(f"tiled_mma: {tiled_mma}")
     # tiled_mma: Tiled MMA
-    #   Thr Layout VMNK: (32,2,2,1):(1,32,64,0)
-    #   Permutation MNK: (32:1,32:1,16:1)
+    #   Thr Layout VMNK: (32,1,1,1):(1,0,0,0)
+    #   Permutation MNK: (16:1,8:1,16:1)
     # MMA Atom
     #   ThrID:           32:1
     #   Shape MNK:       (16,8,16)
@@ -146,7 +145,7 @@ def call_kernel(
     #   TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
     #   TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
 
-    ref_tiled_mma = cute.make_tiled_mma(mma_atom)
+    ref_tiled_mma = cute.make_tiled_mma(mma_atom)  # same with tiled_mma
     print(f"ref_tiled_mma: {ref_tiled_mma}")
     # https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-16816-float
     # ref_tiled_mma: Tiled MMA
@@ -167,7 +166,8 @@ def call_kernel(
             mA,
             mB,
             mC,
-            tiled_mma,
+            # tiled_mma,
+            ref_tiled_mma,
         ).launch(
             grid=grid_dim,
             block=[num_threads, 1, 1],
@@ -197,16 +197,12 @@ def kernel_fn(
     # You'll often see local_tile(Tensor, Tiler, Coord) which is just another name for inner_partition.
     # We call this an inner-partition because it keeps the inner “tile” mode.
     # ref: https://docs.nvidia.com/cutlass/media/docs/cpp/cute/03_tensor.html#inner-and-outer-partitioning
-    # mA: Tensor<0x00007f8ab9e00000@gmem o (128,32):(32,1)>
-    # mB: Tensor<0x00007f8ab9e02000@gmem o (128,32):(1,128)>
-    # mC: Tensor<0x00007f8ab9e04000@gmem o (128,128):(128,1)>
-    # cta_tiler: (128, 128, 32)
     gA = cute.local_tile(mA[None, None], tiler=cta_tiler, coord=tiler_coord, proj=(1, None, 1),)
     gB = cute.local_tile(mB[None, None], tiler=cta_tiler, coord=tiler_coord, proj=(None, 1, 1),)
     gC = cute.local_tile(mC[None, None], tiler=cta_tiler, coord=tiler_coord, proj=(1, 1, None),)
-    print(f"gA: {gA}")  # gA: tensor<ptr<f16, gmem, align<16>> o (128,32,1):(32,1,0)>
-    print(f"gB: {gB}")  # gB: tensor<ptr<f16, gmem, align<16>> o (128,32,1):(1,128,0)>
-    print(f"gC: {gC}")  # gC: tensor<ptr<f16, gmem, align<16>> o (128,128):(128,1)>
+    print(f"gA: {gA}")  # tensor<ptr<f16, gmem, align<16>> o (16,16,1):(16,1,0)>
+    print(f"gB: {gB}")  # tensor<ptr<f16, gmem, align<16>> o (8,16,1):(1,8,0)>
+    print(f"gC: {gC}")  # tensor<ptr<f16, gmem, align<16>> o (16,8):(8,1)>
     # gA(kTileM, kTileK, num_tile_k)
     # gB(kTileN, kTileK, num_tile_k)
     # gC(kTileM, kTileN) 
@@ -214,9 +210,12 @@ def kernel_fn(
     # ///////////////////////////////////////////////////////////////////////////////
     # Tile MMA compute thread partitions and allocate accumulators
     # ///////////////////////////////////////////////////////////////////////////////
+    # illustration: https://zhuanlan.zhihu.com/p/675308830
+
+    # print(f"tiled_mma: {tiled_mma}")
     # tiled_mma: Tiled MMA
-    #   Thr Layout VMNK: (32,2,2,1):(1,32,64,0)
-    #   Permutation MNK: (32:1,32:1,16:1)
+    #   Thr Layout VMNK: (32,1,1,1):(1,0,0,0)
+    #   Permutation MNK: (_,_,_)
     # MMA Atom
     #   ThrID:           32:1
     #   Shape MNK:       (16,8,16)
@@ -226,8 +225,8 @@ def kernel_fn(
     thr_mma = tiled_mma.get_slice(tidx)
     print(f"thr_mma: {thr_mma}")
     # thr_mma: Tiled MMA
-    #   Thr Layout VMNK: (32,2,2,1):(1,32,64,0)
-    #   Permutation MNK: (32:1,32:1,16:1)
+    #   Thr Layout VMNK: (32,1,1,1):(1,0,0,0)
+    #   Permutation MNK: (_,_,_)
     # MMA Atom
     #   ThrID:           32:1
     #   Shape MNK:       (16,8,16)
@@ -235,16 +234,18 @@ def kernel_fn(
     #   TV Layout B:     ((4,8),(2,2)):((16,1),(8,64))
     #   TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
     # MMA_M、MMA_K表示(kTileM, kTileK)按照TiledMMA能力去划分的时候，M方向和K方向需要重复多少次才能完成该矩阵乘法，即M K方向需要循环多少遍TildMMA才能完成计算
-    tAgA = thr_mma.partition_A(gA)  # (MMA=(2,2,2), MMA_M=4, MMA_K=2, num_tile_k)
-    print(f"tAgA: {tAgA}")  # tensor<ptr<f16, gmem, align<4>> o ((2,2,2),4,2,1):((1,256,8),1024,16,0)>
-    tBgB = thr_mma.partition_B(gB)  # (MMA=(2,2), MMA_N=8, MMA_K=2, num_tile_k)
-    print(f"tBgB: {tBgB}")  # tBgB: tensor<ptr<f16, gmem> o ((2,2),8,2,1):((128,1024),16,2048,0)>
-    tCgC = thr_mma.partition_C(gC)  # (MMA=(2,2), MMA_M=4, MMA_N=8)
-    print(f"tCgC: {tCgC}")  # tCgC: tensor<ptr<f16, gmem, align<4>> o ((2,2),4,8):((1,1024),4096,16)>
+    tAgA = thr_mma.partition_A(gA)  # (MMA=(2,2,2), MMA_M=1, MMA_K=1, num_tile_k)
+    print(f"tAgA: {tAgA}")  # tAgA: tensor<ptr<f16, gmem, align<4>> o ((2,2,2),1,1,1):((1,128,8),0,0,0)>
+    tBgB = thr_mma.partition_B(gB)  # (MMA=(2,2), MMA_N=1, MMA_K=1, num_tile_k)
+    print(f"tBgB: {tBgB}")  # tBgB: tensor<ptr<f16, gmem> o ((2,2),1,1,1):((8,64),0,0,0)>
+    tCgC = thr_mma.partition_C(gC)  # (MMA=(2,2), MMA_M=1, MMA_N=1)
+    print(f"tCgC: {tCgC}")  # tCgC: tensor<ptr<f16, gmem, align<4>> o ((2,2),1,1):((1,64),0,0)>
     tArA = tiled_mma.make_fragment_A(tAgA[None, None, None, 0])  # (MMA, MMA_M, MMA_K)
+    print(f"tArA: {tArA}")  # tArA: tensor<ptr<f16, rmem, align<16>> o ((2,2,2),1,1):((1,2,4),0,0)>
     tBrB = tiled_mma.make_fragment_B(tBgB[None, None, None, 0])  # (MMA, MMA_N, MMA_K)
+    print(f"tBrB: {tBrB}")  # tBrB: tensor<ptr<f16, rmem, align<8>> o ((2,2),1,1):((1,2),0,0)>
     tCrC = tiled_mma.make_fragment_C(tCgC)                       # (MMA, MMA_M, MMA_N)
-    print(f"tArA: {tArA}, tBrB: {tBrB}, tCrC: {tCrC}")
+    print(f"tCrC: {tCrC}")  # tCrC: tensor<ptr<f16, rmem, align<8>> o ((2,2),1,1):((1,2),0,0)>
     # Clear the accumulator
     tCrC.fill(0.0)
 
@@ -257,8 +258,10 @@ def kernel_fn(
     for tile_k_index in range(num_tile_k):
         cute.copy(load_copy_atom, tAgA[None, None, None, tile_k_index], tArA)
         cute.copy(load_copy_atom, tBgB[None, None, None, tile_k_index], tBrB)
+        # 因为mma是warp level的，而warp中32个线程从硬件上就同步执行，所以这里不需要在copy后做同步。
 
         # Thread-level register gemm for k_block
+        # 下面会多次调用mma指令，取决于 block size / tiledMMA size
         cute.gemm(
             tiled_mma,
             tCrC,  # d = a*b + c
