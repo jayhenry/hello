@@ -33,7 +33,7 @@ c_dtype = ab_dtype = cutlass.Float16
 acc_dtype = c_dtype  # TODO: cutlass.Float32
 
 a_major = "k"
-b_major = "n"
+b_major = "k"
 c_major = "n"
 
 ab_copy_bits = copy_bits = 128
@@ -92,7 +92,7 @@ def call_kernel(
     #     (self.cta_tiler[0], self.cta_tiler[2], self.num_stages),
     # )
     sA_layout = cute.make_ordered_layout((bM, bK), order=(1, 0))  # (128, 32)
-    sB_layout = cute.make_ordered_layout((bN, bK), order=(0, 1))  # (128, 32)
+    sB_layout = cute.make_ordered_layout((bN, bK), order=(1, 0))  # (128, 32)
     smem_size = max(
             cute.size_in_bytes(mA.element_type, sA_layout)
             + cute.size_in_bytes(mB.element_type, sB_layout),
@@ -366,7 +366,7 @@ def kernel_fn(
     )
     atom_copy_s2r_B = cute.make_copy_atom(
         cute.nvgpu.warp.LdMatrix8x8x16bOp(
-            True, 4
+            False, 4
         ),
         mB.element_type,
     )
@@ -375,6 +375,7 @@ def kernel_fn(
     # 也可以使用 make_tiled_copy_tv 来创建 tiled copy，见 https://github.com/NTT123/cute-viz/blob/main/examples/ldmatrix_copy_example.py
     tiled_copy_s2r_A = cute.make_tiled_copy_A(atom_copy_s2r_A, tiled_mma)
     print(f"tiled_copy_s2r_A: {tiled_copy_s2r_A}")
+    tiled_copy_s2r_B = cute.make_tiled_copy_B(atom_copy_s2r_B, tiled_mma)
     # tiled_copy_s2r_A: Tiled Copy
     #   Tiler MN:        (32:1,16:1)
     #   TV Layout tiled: ((4,8,2,2),((2,2,2),(1,1))):((64,1,16,0),((32,8,256),(0,0)))
@@ -395,7 +396,9 @@ def kernel_fn(
     #   TV Layout Src:   (32,8):(8,1)
     #   TV Layout Dst:   (32,(2,4)):(2,(1,64))
     #   Value type:      f16
-    # thr_copy_ldmatrix_B = tiled_copy_s2r_B.get_slice(tidx)
+
+    thr_copy_ldmatrix_B = tiled_copy_s2r_B.get_slice(tidx)
+
     tCsA_copy_view = thr_copy_ldmatrix_A.partition_S(sA)  # // (CPY, CPY_M, CPY_K)
     print(f"tCsA_copy_view: {tCsA_copy_view}")
     # tCsA_copy_view: tensor<ptr<f16, smem, align<16>> o ((8,1),4,2):((1,0),1024,16)>
@@ -404,8 +407,8 @@ def kernel_fn(
     print(f"tCrA_copy_view: {tCrA_copy_view}")
     # tCrA_copy_view: tensor<ptr<f16, rmem, align<16>> o ((8,1),4,2):((1,0),16,8)>
 
-    # tCsB_copy_view = thr_copy_ldmatrix_B.partition_S(sB)
-    # tCrB_copy_view = thr_copy_ldmatrix_B.retile(tBrB)
+    tCsB_copy_view = thr_copy_ldmatrix_B.partition_S(sB)
+    tCrB_copy_view = thr_copy_ldmatrix_B.retile(tBrB)
 
     # ///////////////////////////////////////////////////////////////////////////////
     # global <-> register universal copy
@@ -415,20 +418,22 @@ def kernel_fn(
 
     num_tile_k = gA.shape[2]
     for tile_k_index in range(num_tile_k):
+        # 因为mma是warp level的，而warp中32个线程从硬件上就同步执行，所以这里不需要在copy后做同步。
         # cute.copy(load_copy_atom, tAgA[None, None, None, tile_k_index], tArA)
         cute.copy(tiled_copy_A, tAgA_copy[None, None, None, tile_k_index], tAsA_copy[None, None, None])
         cute.arch.cp_async_commit_group()
         cute.arch.cp_async_wait_group(n=0)
         cute.arch.sync_threads()
+        #                                                             tArA's view
+        cute.copy(tiled_copy_s2r_A, tCsA_copy_view[None, None, None], tCrA_copy_view[None, None, None])
 
-        cute.copy(
-            tiled_copy_s2r_A,
-            tCsA_copy_view[None, None, None],
-            tCrA_copy_view[None, None, None],
-        )
-
-        cute.copy(load_copy_atom, tBgB[None, None, None, tile_k_index], tBrB)
-        # 因为mma是warp level的，而warp中32个线程从硬件上就同步执行，所以这里不需要在copy后做同步。
+        # cute.copy(load_copy_atom, tBgB[None, None, None, tile_k_index], tBrB)
+        cute.copy(tiled_copy_B, tBgB_copy[None, None, None, tile_k_index], tBsB_copy[None, None, None])
+        cute.arch.cp_async_commit_group()
+        cute.arch.cp_async_wait_group(n=0)
+        cute.arch.sync_threads()
+        #                                                             tBrB's view
+        cute.copy(tiled_copy_s2r_B, tCsB_copy_view[None, None, None], tCrB_copy_view[None, None, None])
 
         # Thread-level register gemm for k_block
         # 下面会多次调用mma指令，取决于 block size / tiledMMA size
