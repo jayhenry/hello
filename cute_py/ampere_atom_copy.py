@@ -170,7 +170,7 @@ def call_kernel(
     # ///////////////////////////////////////////////////////////////////////////////
     permutation_mnk = (
         atom_layout_mnk[0] * mma_inst_shape[0],        
-        atom_layout_mnk[1] * mma_inst_shape[1] ,       
+        atom_layout_mnk[1] * mma_inst_shape[1] * 2,       
         atom_layout_mnk[2] * mma_inst_shape[2],        
     )
     print(f"permutation_mnk: {permutation_mnk}")  
@@ -217,8 +217,8 @@ def call_kernel(
             mA,
             mB,
             mC,
-            # tiled_mma,
-            ref_tiled_mma,
+            tiled_mma,
+            # ref_tiled_mma,
             sA_layout,
             sB_layout,
             tiled_copy_A,
@@ -277,6 +277,7 @@ def kernel_fn(
     sA = smem.allocate_tensor(mA.element_type, sA_layout, 16)  # (kTileM, kTileK)
     sB = smem.allocate_tensor(mB.element_type, sB_layout, 16)  # (kTileN, kTileK)
     print(f"sA: {sA}")
+    # sA: tensor<ptr<f16, smem, align<1024>> o (128,32):(32,1)>
 
     # ///////////////////////////////////////////////////////////////////////////////
     # By tiled copy, get the appropriate fragments for this thread.
@@ -303,7 +304,7 @@ def kernel_fn(
     #   TV Layout Dst:   (1,8):(0,1)
     #   Value type:      f16
     thr_copy_B = tiled_copy_B.get_slice(tidx)
-    tAgA_copy = thr_copy_A.partition_S(gA)  # // (CPY, CPY_M, CPY_K, num_tile_k)
+    tAgA_copy = thr_copy_A.partition_S(gA)  # // (CPY, CPY_M=128/32=4, CPY_K=32/32=1, num_tile_k)
     tAsA_copy = thr_copy_A.partition_D(sA)  # // (CPY, CPY_M, CPY_K)
     tBgB_copy = thr_copy_B.partition_S(gB)
     tBsB_copy = thr_copy_B.partition_D(sB)
@@ -339,33 +340,93 @@ def kernel_fn(
     #   TV Layout C:     ((4,8),(2,2)):((32,1),(16,8))
     # MMA_M、MMA_K表示(kTileM, kTileK)按照TiledMMA能力去划分的时候，M方向和K方向需要重复多少次才能完成该矩阵乘法，即M K方向需要循环多少遍TildMMA才能完成计算
     tAgA = thr_mma.partition_A(gA)  # (MMA=(2,2,2), MMA_M=1, MMA_K=1, num_tile_k)
-    print(f"tAgA: {tAgA}")  # tAgA: tensor<ptr<f16, gmem, align<4>> o ((2,2,2),1,1,1):((1,128,8),0,0,0)>
+    print(f"tAgA: {tAgA}")  # tAgA: tensor<ptr<f16, gmem, align<4>> o ((2,2,2),4,2,1):((1,256,8),1024,16,0)>
     tBgB = thr_mma.partition_B(gB)  # (MMA=(2,2), MMA_N=1, MMA_K=1, num_tile_k)
-    print(f"tBgB: {tBgB}")  # tBgB: tensor<ptr<f16, gmem> o ((2,2),1,1,1):((8,64),0,0,0)>
+    print(f"tBgB: {tBgB}")  # 
     tCgC = thr_mma.partition_C(gC)  # (MMA=(2,2), MMA_M=1, MMA_N=1)
-    print(f"tCgC: {tCgC}")  # tCgC: tensor<ptr<f16, gmem, align<4>> o ((2,2),1,1):((1,64),0,0)>
+    print(f"tCgC: {tCgC}")  # 
     tArA = tiled_mma.make_fragment_A(tAgA[None, None, None, 0])  # (MMA, MMA_M, MMA_K)
-    print(f"tArA: {tArA}")  # tArA: tensor<ptr<f16, rmem, align<16>> o ((2,2,2),1,1):((1,2,4),0,0)>
+    print(f"tArA: {tArA}")  # tArA: tensor<ptr<f16, rmem, align<16>> o ((2,2,2),4,2):((1,2,4),16,8)>
     tBrB = tiled_mma.make_fragment_B(tBgB[None, None, None, 0])  # (MMA, MMA_N, MMA_K)
-    print(f"tBrB: {tBrB}")  # tBrB: tensor<ptr<f16, rmem, align<8>> o ((2,2),1,1):((1,2),0,0)>
+    print(f"tBrB: {tBrB}")  # 
     tCrC = tiled_mma.make_fragment_C(tCgC)                       # (MMA, MMA_M, MMA_N)
-    print(f"tCrC: {tCrC}")  # tCrC: tensor<ptr<f16, rmem, align<8>> o ((2,2),1,1):((1,2),0,0)>
+    print(f"tCrC: {tCrC}")  # 
     # Clear the accumulator
     tCrC.fill(0.0)
 
-    num_tile_k = gA.shape[2]
+    # ///////////////////////////////////////////////////////////////////////////////
+    # SharedMem to Register Copy Atom 
+    # ///////////////////////////////////////////////////////////////////////////////
+    # Create the copy atoms for the copy from shared memory to register
+    atom_copy_s2r_A = cute.make_copy_atom(
+        cute.nvgpu.warp.LdMatrix8x8x16bOp(
+            False, 4  # atomM=16, atomK=16, so num_matrices=4 (8x8 * 4)
+        ),
+        mA.element_type,
+    )
+    atom_copy_s2r_B = cute.make_copy_atom(
+        cute.nvgpu.warp.LdMatrix8x8x16bOp(
+            True, 4
+        ),
+        mB.element_type,
+    )
+    # Creates the tiled copy so that it matches the thread-value layout
+    # expected by the tiled mma
+    # 也可以使用 make_tiled_copy_tv 来创建 tiled copy，见 https://github.com/NTT123/cute-viz/blob/main/examples/ldmatrix_copy_example.py
+    tiled_copy_s2r_A = cute.make_tiled_copy_A(atom_copy_s2r_A, tiled_mma)
+    print(f"tiled_copy_s2r_A: {tiled_copy_s2r_A}")
+    # tiled_copy_s2r_A: Tiled Copy
+    #   Tiler MN:        (32:1,16:1)
+    #   TV Layout tiled: ((4,8,2,2),((2,2,2),(1,1))):((64,1,16,0),((32,8,256),(0,0)))
+    # Copy Atom
+    #   ThrID:           32:1
+    #   TV Layout Src:   (32,8):(8,1)
+    #   TV Layout Dst:   (32,(2,4)):(2,(1,64))
+    #   Value type:      f16
+    # tiled_copy_s2r_B = cute.make_tiled_copy_B(atom_copy_s2r_B, tiled_mma)
 
-    # global <-> register copy
+    thr_copy_ldmatrix_A = tiled_copy_s2r_A.get_slice(tidx)
+    print(f"thr_copy_ldmatrix_A: {thr_copy_ldmatrix_A}")
+    # thr_copy_ldmatrix_A: Tiled Copy
+    #   Tiler MN:        (32:1,16:1)
+    #   TV Layout tiled: ((4,8,2,2),((2,2,2),(1,1))):((64,1,16,0),((32,8,256),(0,0)))
+    # Copy Atom
+    #   ThrID:           32:1
+    #   TV Layout Src:   (32,8):(8,1)
+    #   TV Layout Dst:   (32,(2,4)):(2,(1,64))
+    #   Value type:      f16
+    # thr_copy_ldmatrix_B = tiled_copy_s2r_B.get_slice(tidx)
+    tCsA_copy_view = thr_copy_ldmatrix_A.partition_S(sA)  # // (CPY, CPY_M, CPY_K)
+    print(f"tCsA_copy_view: {tCsA_copy_view}")
+    # tCsA_copy_view: tensor<ptr<f16, smem, align<16>> o ((8,1),4,2):((1,0),1024,16)>
+    # 由于MMA时已经声明了寄存器存储空间，此处直接对其进行线程级小块的retile即可，不再是大块到小块的partition。
+    tCrA_copy_view = thr_copy_ldmatrix_A.retile(tArA)  # // (CPY, CPY_M, CPY_K)
+    print(f"tCrA_copy_view: {tCrA_copy_view}")
+    # tCrA_copy_view: tensor<ptr<f16, rmem, align<16>> o ((8,1),4,2):((1,0),16,8)>
+
+    # tCsB_copy_view = thr_copy_ldmatrix_B.partition_S(sB)
+    # tCrB_copy_view = thr_copy_ldmatrix_B.retile(tBrB)
+
+    # ///////////////////////////////////////////////////////////////////////////////
+    # global <-> register universal copy
+    # ///////////////////////////////////////////////////////////////////////////////
     load_copy_atom= cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), gA.element_type)
     store_copy_atom= cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), gC.element_type)
 
+    num_tile_k = gA.shape[2]
     for tile_k_index in range(num_tile_k):
+        # cute.copy(load_copy_atom, tAgA[None, None, None, tile_k_index], tArA)
         cute.copy(tiled_copy_A, tAgA_copy[None, None, None, tile_k_index], tAsA_copy[None, None, None])
         cute.arch.cp_async_commit_group()
         cute.arch.cp_async_wait_group(n=0)
         cute.arch.sync_threads()
 
-        cute.copy(load_copy_atom, tAgA[None, None, None, tile_k_index], tArA)
+        cute.copy(
+            tiled_copy_s2r_A,
+            tCsA_copy_view[None, None, None],
+            tCrA_copy_view[None, None, None],
+        )
+
         cute.copy(load_copy_atom, tBgB[None, None, None, tile_k_index], tBrB)
         # 因为mma是warp level的，而warp中32个线程从硬件上就同步执行，所以这里不需要在copy后做同步。
 
