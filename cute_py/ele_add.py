@@ -185,7 +185,7 @@ def elementwise_add_kernel(
     blockA = gA[block_coord]
     blockB = gB[block_coord]
     blockC = gC[block_coord]
-    print("blockA = {}", blockA.type)
+    print("blockA = {}", blockA.type)  # blockA = {} !cute.memref<f16, gmem, align<16>, "((16,256)):((2048,1))">
 
     #--------------------------------
     # slice for thread level view
@@ -344,8 +344,8 @@ def tvlayout():
     b_ = from_dlpack(b, assumed_align=16)
     c_ = from_dlpack(c, assumed_align=16)
     
-    # elementwise_add_ = cute.compile(elementwise_add, a_, b_, c_)
-    elementwise_add_ = cute.compile(elementwise_add_mytv, a_, b_, c_)
+    elementwise_add_ = cute.compile(elementwise_add, a_, b_, c_)
+    # elementwise_add_ = cute.compile(elementwise_add_mytv, a_, b_, c_)
     elementwise_add_(a_, b_, c_)
     
     # verify correctness
